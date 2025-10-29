@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>カードマップ</title>
+<style>
+body{margin:0;display:flex;font-family:sans-serif;height:100vh;}
+#canvas{flex:1;background:#fafafa;min-width:600px;min-height:600px;overflow:hidden;}
+.panel{flex:3;padding:1rem;border-left:1px solid #ddd;overflow:auto;}
+.btn{margin-top:8px;padding:6px 10px;border-radius:6px;background:#2b8;color:white;border:none;cursor:pointer;}
+#newWord,#newMapName,#panel-url,#panel-body{width:100%;padding:6px;margin-top:8px;}
+#mapList button{margin:4px;}
+.related-word{display:inline-block;padding:2px 4px;margin:2px;background:#eee;border-radius:4px;font-size:11px;cursor:pointer;}
+#panel-title{cursor:pointer;color:blue;text-decoration:underline;}
+#panel-body{height:150px;white-space:pre-wrap;}
+#panel-thumbnail img{max-width:100px; max-height:100px; display:block; margin-top:4px;}
+</style>
+</head>
+<body>
+<div id="canvas"></div>
+<div class="panel">
+
+<hr>
+<h3 id="panel-title">カードを選択してください</h3>
+
+<!-- サムネイル表示 -->
+<div id="panel-thumbnail"></div>
+<input type="file" id="uploadImage" accept="image/*" style="margin-top:4px;"/>
+<button class="btn" id="uploadImageBtn">画像アップロード</button>
+
+<textarea id="panel-body" placeholder="本文を編集できます"></textarea>
+<input id="panel-url" placeholder="URLを入力してください"/>
+<input id="newWord" placeholder="新しい単語を追加"/>
+<button class="btn" id="addWordBtn">サブカード追加</button>
+
+<h4>関連ワード</h4>
+<div id="relatedWords"></div>
+
+<h3>マップ操作</h3>
+<input id="newMapName" placeholder="新規カード名"/>
+<button class="btn" id="newMapBtn">新規カード作成</button>
+<button class="btn" id="saveMapBtn">マップ保存</button>
+
+<h4>保存済みマップ</h4>
+<div id="mapList"></div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+let mindmapData=null;
+let selectedNode=null;
+
+// --- マップ一覧取得 ---
+function refreshMapList(){
+  fetch('/maps').then(r=>r.json()).then(files=>{
+    const list=document.getElementById("mapList");
+    list.innerHTML="";
+    files.forEach(f=>{
+      const btn=document.createElement("button");
+      btn.textContent=f.replace(/\.json$/,"");
+      btn.onclick=()=>loadMap(f);
+      list.appendChild(btn);
+    });
+  });
+}
+refreshMapList();
+
+// --- 使用ログ記録 ---
+const userName = prompt("あなたの名前を入力してください（ログ用）") || "guest";
+const startTime = Date.now();
+
+// アクセス開始ログ
+fetch("/log/start", {
+  method: "POST",
+  headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({user: userName, map: "main"})
+});
+
+// ページ離脱時に終了ログ送信
+window.addEventListener("beforeunload", ()=>{
+  fetch("/log/end", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({user: userName, map: "main"})
+  });
+});
+
+
+// --- 新規マップ作成 ---
+document.getElementById("newMapBtn").onclick=()=>{
+  const name=document.getElementById("newMapName").value.trim();
+  if(!name) return alert("マップ名を入力");
+  mindmapData={ root:"root", nodes:[{id:"root",label:name,text:"",url:"",image:null}], links:[] };
+  selectedNode=mindmapData.nodes[0];
+  renderMindmap(); selectNode(selectedNode);
+  document.getElementById("newMapName").value="";
+}
+
+// --- マップ保存 ---
+document.getElementById("saveMapBtn").onclick=()=>{
+  if(!mindmapData) return;
+  const filename=prompt("保存するマップ名", selectedNode.label);
+  if(!filename) return;
+  fetch("/map/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...mindmapData, filename:filename})})
+  .then(r=>r.json()).then(j=>{ if(j.ok){alert("保存しました"); refreshMapList();} else alert("保存失敗") });
+}
+
+// --- マップロード ---
+function loadMap(file){
+  fetch(`/map/load/${file}`).then(r=>r.json()).then(d=>{
+    mindmapData=d;
+    selectedNode=mindmapData.nodes.find(n=>n.id===mindmapData.root);
+    renderMindmap(); selectNode(selectedNode);
+  });
+}
+
+// --- ノード追加 ---
+document.getElementById("addWordBtn").onclick = ()=>{
+  if(!selectedNode) return alert("ノードを選択してください");
+  const word = document.getElementById("newWord").value.trim();
+  if(!word) return;
+
+  const newId = "n_" + Date.now();
+  const newNode = {id:newId, label:word, text:"", url:"", parent:selectedNode.id, image:null};
+  mindmapData.nodes.push(newNode);
+  mindmapData.links.push({source:selectedNode.id, target:newId, word:word});
+  selectedNode = newNode;
+
+  // Wikipedia要約
+  fetch('/api/wiki',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({word: word})
+  }).then(r=>r.json()).then(j=>{
+    newNode.text = (j.ok && j.summary) ? j.summary : "(Wikipedia取得できませんでした)";
+    renderMindmap();
+    selectNode(newNode);
+  });
+
+  // 関連ワード
+  fetch('/api/related',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({word: word})
+  }).then(r=>r.json()).then(j=>{
+    const relDiv=document.getElementById("relatedWords");
+    relDiv.innerHTML="";
+    if(j.ok && j.related.length){
+      j.related.forEach(rw=>{
+        const span=document.createElement("span");
+        span.textContent=rw;
+        span.className="related-word";
+        span.onclick = ()=>{ 
+          document.getElementById("newWord").value = rw;
+          document.getElementById("addWordBtn").click();
+        };
+        relDiv.appendChild(span);
+      });
+    } else relDiv.textContent="関連ワードなし";
+  });
+
+  document.getElementById("newWord").value="";
+};
+
+// --- 画像アップロード（手動） ---
+document.getElementById("uploadImageBtn").onclick = ()=>{
+  const fileInput = document.getElementById("uploadImage");
+  if(!fileInput.files || !fileInput.files[0]) return alert("画像を選択してください");
+  const file = fileInput.files[0];
+
+  const reader = new FileReader();
+  reader.onload = function(e){
+    if(selectedNode){
+      selectedNode.image = e.target.result; // base64として保存
+      selectNode(selectedNode); // パネル更新
+      renderMindmap(); // 必要に応じて再描画
+    }
+  };
+  reader.readAsDataURL(file);
+};
+
+// --- 深さ計算 ---
+function getDepth(nodeId){
+  let depth=0, node=mindmapData.nodes.find(n=>n.id===nodeId);
+  while(node && node.parent){ depth++; node=mindmapData.nodes.find(n=>n.id===node.parent); }
+  return depth;
+}
+
+// --- 座標計算（縮小率と距離連動） ---
+function computePositions(nodeId, angleStart=0, angleEnd=2*Math.PI, depth=0, positions={}){
+  const children = mindmapData.nodes.filter(n=>n.parent===nodeId);
+  const scale = Math.max(1 - depth*0.1, 0.4);
+  const baseR = 50;
+  const r = baseR * scale + depth*30;
+
+  const step = children.length > 0 ? (angleEnd - angleStart)/children.length : 0;
+  children.forEach((child,i)=>{
+    const angle = angleStart + step*(i+0.5);
+    const x = positions[nodeId].x + Math.cos(angle)*r;
+    const y = positions[nodeId].y + Math.sin(angle)*r;
+    positions[child.id]={x:x,y:y};
+    computePositions(child.id, angleStart+i*step, angleStart+(i+1)*step, depth+1, positions);
+  });
+  return positions;
+}
+
+// --- マインドマップ描画 ---
+function renderMindmap(){
+  const canvas=document.getElementById("canvas");
+  canvas.innerHTML="";
+  if(!mindmapData) return;
+
+  const width=canvas.clientWidth, height=canvas.clientHeight;
+  const svg=d3.select(canvas).append("svg").attr("width",width).attr("height",height);
+
+  const g = svg.append("g");
+  const zoom = d3.zoom().scaleExtent([0.2,3])
+    .on("zoom", (event)=> g.attr("transform", event.transform));
+  svg.call(zoom);
+
+  const positions={};
+  positions[mindmapData.root]={x:width/2,y:height/2};
+  computePositions(mindmapData.root,0,2*Math.PI,0,positions);
+
+  mindmapData.nodes.forEach(n=>{
+    const pos=positions[n.id]; if(!pos) return;
+    const depth = getDepth(n.id);
+    const scale = Math.max(1 - depth*0.1, 0.4);
+    const rectWidth = 60*scale, rectHeight = 40*scale;
+    const fontSize = 12*scale;
+
+    g.append("rect")
+      .attr("x", pos.x - rectWidth/2)
+      .attr("y", pos.y - rectHeight/2)
+      .attr("width", rectWidth)
+      .attr("height", rectHeight)
+      .attr("rx", 10).attr("ry", 10)
+      .attr("fill","#fff")
+      .attr("stroke","#3a7")
+      .style("cursor","pointer")
+      .on("click",()=>selectNode(n));
+
+    g.append("text")
+      .attr("x", pos.x).attr("y", pos.y)
+      .attr("font-size", fontSize)
+      .attr("text-anchor", "middle")
+      .attr("alignment-baseline", "middle")
+      .text(n.label);
+  });
+}
+
+// --- ノード選択 ---
+function selectNode(n){
+  selectedNode = n;
+  document.getElementById("panel-title").textContent = n.label;
+  document.getElementById("panel-body").value = n.text || "";
+  document.getElementById("panel-url").value = n.url || "";
+
+  // サムネイル表示
+  const container = document.getElementById("panel-thumbnail");
+  container.innerHTML = "";
+  if(n.image){
+    const img = document.createElement("img");
+    img.src = n.image;
+    container.appendChild(img);
+  }
+}
+
+// --- 本文・URL編集反映 ---
+document.getElementById("panel-body").addEventListener("input",(e)=>{ if(selectedNode) selectedNode.text=e.target.value; });
+document.getElementById("panel-url").addEventListener("input",(e)=>{ if(selectedNode) selectedNode.url=e.target.value; });
+
+// --- タイトルクリックでURLを開く ---
+document.getElementById("panel-title").onclick=()=>{ if(selectedNode && selectedNode.url) window.open(selectedNode.url,"_blank"); };
+</script>
+</body>
+</html>

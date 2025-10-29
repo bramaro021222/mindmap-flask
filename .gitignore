@@ -1,0 +1,8 @@
+# .gitignore
+__pycache__/
+*.pyc
+instance/
+logs/
+static/uploads/
+maps/
+.env
