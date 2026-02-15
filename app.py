@@ -152,7 +152,6 @@ from datetime import datetime
 
 LOG_FILE = "logs.json"
 os.makedirs("logs", exist_ok=True)
-
 def save_log(entry):
     try:
         path = os.path.join("logs", LOG_FILE)
